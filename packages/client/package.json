@@ -1,0 +1,17 @@
+{
+  "name": "deepseek-voice-mode-ui",
+  "description": "deepseek-voice-mode browser surface: power toggle, live pill with captions and thread cards, push-to-talk",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  }
+}
