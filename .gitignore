@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+*.log
+coverage/
+
+# Dev scaffolding artifacts (see voice-link/m0-driver.js)
+m0-out.mp3
+
+# Misc
+__pycache__/
+*.pyc

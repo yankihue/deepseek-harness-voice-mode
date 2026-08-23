@@ -1,0 +1,13 @@
+{
+  "name": "deepseek-voice-mode-link",
+  "description": "Dependency-free Node >= 22 helper for deepseek-voice-mode: ElevenLabs realtime STT/TTS over RFC6455 WebSockets, stdio NDJSON control + byte tunnel",
+  "version": "0.1.0",
+  "private": true,
+  "main": "entry.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

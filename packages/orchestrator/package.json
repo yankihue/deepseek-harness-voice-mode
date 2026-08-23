@@ -1,0 +1,10 @@
+{
+  "name": "deepseek-voice-mode-orchestrator",
+  "description": "deepseek-voice-mode host orchestrator: static Cordis composition plugin (plugin.cjs generated from host.js)",
+  "version": "0.1.0",
+  "private": true,
+  "main": "plugin.cjs",
+  "engines": {
+    "node": ">=22"
+  }
+}

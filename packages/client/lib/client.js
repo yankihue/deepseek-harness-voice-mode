@@ -1,4 +1,4 @@
-/* deepseek-voice-mode UI — generated client bundle (source: ../client.js). */
+/* deepseek-voice-mode UI — deployed client bundle (edited directly; see UI-NOTES.md). */
 window.__ModuleLoader__.load({
   id: "deepseek-voice-mode-ui",
   factory: function (require) {
@@ -163,6 +163,9 @@ window.__ModuleLoader__.load({
           case 'tts.canceled':
             cancelPlayback(msg.id);
             break;
+          case 'tts.error':
+            mic.suppress = false; // playback pipeline failed: never stay muted
+            break;
           case 'error':
             console.error('[dsvm]', msg.code, msg.message);
             break;
@@ -209,7 +212,7 @@ window.__ModuleLoader__.load({
       }
 
       /* ============ mic capture ============ */
-      var mic = { stream: null, ctxA: null, node: null, workletLoaded: false, lastLevelTs: 0 };
+      var mic = { stream: null, ctxA: null, node: null, workletLoaded: false, lastLevelTs: 0, suppress: false };
       var WORKLET_SRC =
         'class DsvmTap extends AudioWorkletProcessor {' +
         ' constructor(){super();this.buf=new Float32Array(4096);this.n=0;}' +
@@ -275,6 +278,7 @@ window.__ModuleLoader__.load({
                     for (var i = 0; i < f32.length; i += 8) sum += f32[i] * f32[i];
                     store.set({ level: Math.min(1, Math.sqrt(sum / (f32.length / 8)) * 4) });
                   }
+                  if (mic.suppress) return; // our own TTS replies play now: never feed the speakers back into STT
                   if (!(net.ws && net.ws.readyState === 1)) return;
                   var targetRate = 16000;
                   var pcm = f32;
@@ -340,7 +344,7 @@ window.__ModuleLoader__.load({
       }
 
       /* ============ playback engine ============ */
-      var play = { ctxP: null, utts: {} }; // id -> {chunks:[], sources:[], nextAt}
+      var play = { ctxP: null, utts: {}, activeCount: 0 }; // id -> {chunks:[], sources:[], nextAt}
       function ensurePlayCtx() {
         if (!play.ctxP) {
           var AC = globalThis.AudioContext || globalThis.webkitAudioContext;
@@ -371,18 +375,20 @@ window.__ModuleLoader__.load({
       function cancelPlayback(id) {
         var u = play.utts[id];
         if (!u) return;
+        if (play.activeCount > 0) play.activeCount--;
         u.sources.forEach(function (s) { try { s.stop(); } catch (e) {} });
         delete play.utts[id];
+        if (play.activeCount <= 0) mic.suppress = false;
       }
       function playChunk(id, b64, done) {
         if (!b64) { if (done) cancelPlayback(id); return; }
         var u = play.utts[id];
-        if (!u) u = play.utts[id] = { chunks: [], sources: [], nextAt: 0 };
+        if (!u) { u = play.utts[id] = { chunks: [], sources: [], nextAt: 0 }; play.activeCount++; }
         u.chunks.push(b64);
         if (!done) return;
         // utterance complete: decode all chunks then play gaplessly
         var ctxP = ensurePlayCtx();
-        if (!ctxP) { delete play.utts[id]; return; } // no audio API: drop silently
+        if (!ctxP) { cancelPlayback(id); return; } // no audio API: drop silently
         var buffers = [];
         var chain = Promise.resolve();
         u.chunks.forEach(function (b) {
@@ -393,16 +399,24 @@ window.__ModuleLoader__.load({
         chain.then(function () {
           delete play.utts[id];
           var at = Math.max(ctxP.currentTime + 0.02, u.nextAt || 0);
-          buffers.forEach(function (buf) {
+          buffers.forEach(function (buf, i) {
             var src = ctxP.createBufferSource();
             src.buffer = buf;
             src.connect(ctxP.destination);
             src.start(at);
             u.sources.push(src);
+            if (i === buffers.length - 1) src.onended = function () { // mic reopens when the LAST buffer finishes
+              if (play.activeCount > 0) play.activeCount--;
+              if (play.activeCount <= 0) mic.suppress = false;
+            };
             at += buf.duration;
           });
           u.nextAt = at;
-          if (buffers.length === 0) store.set({ phase: 'ready', speakingText: '' });
+          if (buffers.length === 0) { // nothing was decoded: release immediately
+            if (play.activeCount > 0) play.activeCount--;
+            if (play.activeCount <= 0) mic.suppress = false;
+            store.set({ phase: 'ready', speakingText: '' });
+          }
         });
       }
       /* ============ React components ============ */
@@ -436,7 +450,7 @@ window.__ModuleLoader__.load({
       function Pill(props) {
         var s = useStore();
         var dot = el('span', { className: 'dsvm-dot ' + (s.phase === 'listening' ? 'dsvm-pulse' : ''), style: { background: PHASE_COLOR[s.phase] || '#888' } });
-        var snippet = s.unsupported ? '⚠ ' + s.unsupported : (s.partial || s.lastCommitted || (s.phase === 'disconnected' ? 'Voice is off' : s.phase + '·v14'));
+        var snippet = s.unsupported ? '⚠ ' + s.unsupported : (s.partial || s.lastCommitted || (s.phase === 'disconnected' ? 'Voice is off' : s.phase + '·v15'));
         var inner = [
           dot,
           s.phase === 'listening' ? el(LevelBars, { key: 'bars', s: s }) : null,

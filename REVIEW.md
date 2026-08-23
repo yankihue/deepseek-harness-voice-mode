@@ -92,6 +92,8 @@ plugin halves use only harness-provided services.
 | H10 | **Voice agents never JOINED an agent preset** — `meta.agentPreset` only records the header; the agent publishes on the "empty global layer" (only process-wide `voice_say`; every real tool call → `UNKNOWN_TOOL`). Fix: `agents.create` `setup(agentCtx)` = `async () => { await agentPresets.mount(agentCtx, undefined) }` (deployment default, same as the GUI). Subtleties: MUST return nothing (a returned mount result carries a non-callable `.commit` → `?.commit is not a function`) and MUST be awaited (unawaited mount races the first prompt assembly → step 1 still sees voice_say-only). | fixed ✓ | verified: test voice thread ran `bash` → `echo VOICE_TOOLS_OK`, completed |
 | H11 | **Voice agents had no `cwd`** — persona assembly dies with `{{cwd}} has no value` (sessions land in `_no-cwd/`). Fix: `meta.cwd` = newest real session cwd (refresh-derived), fallback `sandboxPolicy.workspaceRoot`. | fixed ✓ | |
 | H12 | **No TTS sound in browser** — playback `AudioContext` created inside the WS message handler, outside any user gesture → blocked by Firefox/Chrome autoplay policy; server-side TTS always looked healthy. Fix: seed/resume the context inside `pttToggle` + document `pointerdown`/`keydown`. | fixed, audible confirmation pending | |
+| H13 | **Voice was never conversational** — routed messages landed in threads but nothing spoke the *answer* back; only priority-1 acks ("Got it.") and status announces existed. Fix: reply watches (`state.replyWatch`) — every voice-sent message (create/message/route_current) arms a watch on the target session, gated on `agent/inbox/claimed` for the exact message id (so a question spoken mid-turn never grabs the current turn's text); the `session/event` firehose accumulates `assistant/message` texts; on `agent/status idle` the last non-empty text is spoken at priority 0. `route_current` pins `conversationId` (bare answers); other threads get an "On …" prefix. Stale acks pending ≥ armedAt are dropped; the following "is idle" announce is suppressed; 20-min lifetime cap. | fixed, needs live conversation round | |
+| H14 | **Echo loop / cut-off in ambient mode** — the open mic hears our own TTS → `stt.partial` → client `bargeIn()` cancels the reply mid-sentence (very plausible cause of the earlier green→gray cut-off once audio worked). Fix: client suppresses mic forwarding (`mic.suppress`) while TTS utterances are actually playing (per-utterance `play.activeCount`, released on last buffer `onended`, on `tts.canceled`/`tts.error`, and on no-buffer decodes); URL `?t=` handshake unchanged. | fixed, verify during conversation round | |
 
 Not hacks / deliberate harness-native choices: static composition rows via the user
 patch layer; webServer routes for RPC+WS; subprocess service for lifecycle; clientModules
@@ -114,6 +116,10 @@ semantics via settings; event-driven announcements with no idle LLM usage.
   "summarize <thread>" / anything else falls through to your current thread as a
   normal message.
 - Threads report back aloud (throttled ≥8s, coalesced, capped) when watched.
+- **Conversation**: speak a question → it lands in the current chat → the answer is
+  spoken back (bare). Message a named/running thread → its final answer is spoken
+  with an "On …" prefix. Mic is suppressed while a reply plays (no echo loops);
+  speak again when it finishes. The pill shows `·v15` on the new client bundle.
 
 ## 6. How to share / install (GitHub repo recipe)
 
@@ -152,7 +158,7 @@ Rollback: remove the insert block + symlink; restart.
 | Subagents | W1 voice-link ✓(+1 recovery nudge) · W2 orchestrator ✓ · W3 UI ✗✗ (delegated failures → main agent built it) · W4 probes/integration = main agent |
 | Source delivered | ≈4.9k LOC + 1.7k test LOC, 29 files (incl. docs) |
 | Automated tests | 100 (offline; fake sockets) — all green at ship |
-| Live bugs found & fixed during bring-up + real-world test round | 11 (wss-scheme rejection; phantom pipelined request → TLS MAC; unmasked client frames; TTS header auth at upgrade; missing /stream-input path; stop-vs-final-transcript race; koishi function-export convention) + 1 driver sequencing bug + 1 loader exports discovery gap + **H9 hello frame** + **H10 preset join** + **H11 cwd** + **H12 TTS autoplay** |
+| Live bugs found & fixed during bring-up + real-world test round | 11 (wss-scheme rejection; phantom pipelined request → TLS MAC; unmasked client frames; TTS header auth at upgrade; missing /stream-input path; stop-vs-final-transcript race; koishi function-export convention) + 1 driver sequencing bug + 1 loader exports discovery gap + **H9 hello frame** + **H10 preset join** + **H11 cwd** + **H12 TTS autoplay** + **H13 no conversational replies** + **H14 echo-driven cut-off** |
 | Restarts used | 3 (user-initiated) · diagnostic boots ~7 |
 | Token usage | Not directly observable to the agent; estimate order **2–5M tokens total** across main thread + subagents (main context peaked well past 150k with compactions; heavy reads of vendored .d.ts sources). Exact numbers: check provider dashboard for the session. |
 | ElevenLabs spend so far | seconds-scale STT/TTS from drills only (well under typical free tier) |
