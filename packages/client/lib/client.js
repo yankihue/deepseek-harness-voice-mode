@@ -69,9 +69,22 @@ window.__ModuleLoader__.load({
       }
 
       /* ============ WebSocket session (audio leg) ============ */
-      var net = { ws: null, backoffMs: 500, closedByUs: false, pingDisposer: null };
+      var net = { ws: null, backoffMs: 500, closedByUs: false, pingDisposer: null, waiters: [] };
       function wsSend(obj) {
         if (net.ws && net.ws.readyState === 1) { try { net.ws.send(JSON.stringify(obj)); } catch (e) {} }
+      }
+      // Resolve once the audio WS is open (or false after 4s timeout).
+      function wsReady() {
+        if (net.ws && net.ws.readyState === 1) return Promise.resolve(true);
+        return new Promise(function (resolve) {
+          net.waiters.push(resolve);
+          connectWs();
+          ctx.timeout(function () {
+            var i = net.waiters.indexOf(resolve);
+            if (i >= 0) net.waiters.splice(i, 1);
+            resolve(false);
+          }, 4000);
+        });
       }
       function connectWs() {
         var problems = probe();
@@ -85,9 +98,15 @@ window.__ModuleLoader__.load({
           try { ws = new WebSocket(proto + location.host + '/__dsh-voice/ws?t=' + res.token); }
           catch (e) { scheduleReconnect(); return; }
           net.ws = ws;
+          net.helloToken = res.token;
           ws.onopen = function () {
             net.backoffMs = 500;
-            store.set({ phase: 'ready' });
+            if (store.get().phase === 'disconnected') store.set({ phase: 'ready' });
+            var w = net.waiters; net.waiters = [];
+            for (var wi = 0; wi < w.length; wi++) { try { w[wi](true); } catch (e) {} }
+            // PROTOCOL: hello must precede any other frame; the helper drops
+            // everything until {type:'hello', proto:1, token} is accepted.
+            wsSend({ type: 'hello', proto: 1, token: net.helloToken });
             wsSend({ type: 'ping', ts: Date.now() });
             if (net.pingDisposer) net.pingDisposer();
             net.pingDisposer = ctx.interval(function () { wsSend({ type: 'ping', ts: Date.now() }); }, 10000);
@@ -206,6 +225,31 @@ window.__ModuleLoader__.load({
         }
         return out;
       }
+      // Worklet module loading: try blob: URL, then data: URL, then a
+      // same-origin server URL (Firefox rejects some URL forms in addModule).
+      function workletSrcUrl() {
+        try { return URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'application/javascript' })); }
+        catch (e) { return null; }
+      }
+      function workletDataUrl() {
+        try { return 'data:text/javascript;base64,' + btoa(WORKLET_SRC); } catch (e) { return null; }
+      }
+      function ensureWorklet(ctxA) {
+        var urls = [];
+        var b = workletSrcUrl(); if (b) urls.push(b);
+        var d = workletDataUrl(); if (d) urls.push(d);
+        urls.push('/__dsh-voice/worklet.js');
+        var i = 0;
+        function next() {
+          if (i >= urls.length) return Promise.reject(new Error('worklet: no usable URL form (tried blob, data, server)'));
+          var url = urls[i++];
+          return ctxA.audioWorklet.addModule(url).catch(function (err) {
+            console.warn('[dsvm] worklet attempt failed (' + String(url).slice(0, 24) + '): ' + String(err && err.message || err));
+            return next();
+          });
+        }
+        return next();
+      }
       function startMic() {
         var problems = probe();
         if (problems.length) return Promise.resolve(false);
@@ -218,7 +262,7 @@ window.__ModuleLoader__.load({
             mic.stream = stream;
             mic.ctxA = ctxA;
             var src = ctxA.createMediaStreamSource(stream);
-            return ctxA.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'application/javascript' })))
+            return ensureWorklet(ctxA)
               .then(function () {
                 var node = new AudioWorkletNode(ctxA, 'dsvm-tap');
                 node.port.onmessage = function (ev) {
@@ -251,6 +295,7 @@ window.__ModuleLoader__.load({
               });
           }).catch(function (err) {
             console.error('[dsvm] mic failed:', err && err.message);
+            store.set({ unsupported: 'mic failed: ' + String(err && err.message || err) });
             stopMic();
             return false;
           });
@@ -261,14 +306,37 @@ window.__ModuleLoader__.load({
         if (mic.stream) { mic.stream.getTracks().forEach(function (t) { t.stop(); }); mic.stream = null; }
         store.set({ level: 0 });
       }
+      var pttArmed = false;
       function pttDown() {
         if (store.get().phase === 'disconnected') return;
-        startMic().then(function (ok) { if (ok) wsSend({ type: 'listen.start', commit: 'vad' }); });
+        pttArmed = true;
+        store.set({ phase: 'listening', partial: '', unsupported: '' });
+        wsReady().then(function (okWs) {
+          if (!pttArmed) return;
+          if (!okWs) { store.set({ phase: 'ready', unsupported: 'Voice link unavailable' }); return; }
+          return startMic();
+        }).then(function (okMic) {
+          if (!pttArmed) return;
+          if (!okMic) return; // startMic already set the error state
+          try { wsSend({ type: 'listen.start', commit: 'vad' }); }
+          catch (e) { store.set({ unsupported: 'send failed: ' + String(e && e.message || e) }); }
+        });
       }
       function pttUp() {
+        pttArmed = false;
         if (store.get().phase === 'disconnected') return;
         wsSend({ type: 'listen.stop' });
         stopMic();
+      }
+      // Ambient mode (permanent): one press toggles listening on/off.
+      function pttToggle() {
+        if (store.get().phase === 'disconnected') return;
+        seedPlayCtx(); // user gesture: unblock the playback context for TTS
+        if (store.get().phase === 'listening') pttUp();
+        else {
+          store.set({ phase: 'listening', partial: '' }); // optimistic: instant pill feedback
+          pttDown();
+        }
       }
 
       /* ============ playback engine ============ */
@@ -276,11 +344,19 @@ window.__ModuleLoader__.load({
       function ensurePlayCtx() {
         if (!play.ctxP) {
           var AC = globalThis.AudioContext || globalThis.webkitAudioContext;
-          play.ctxP = new AC();
+          if (!AC) return null;
+          try { play.ctxP = new AC(); } catch (e) { play.ctxP = null; }
         }
-        if (play.ctxP.state === 'suspended') { try { play.ctxP.resume(); } catch (e) {} }
+        if (play.ctxP && play.ctxP.state === 'suspended') {
+          try { var p = play.ctxP.resume(); if (p && typeof p.catch === 'function') p.catch(function () {}); } catch (e) {}
+        }
         return play.ctxP;
       }
+      // Seed/resume the playback context inside REAL user gestures: Firefox
+      // (and Chrome) only start AudioContexts created/resumed within one, and
+      // TTS chunks arrive seconds later over the WS, outside any gesture —
+      // without this nothing is ever audible.
+      function seedPlayCtx() { ensurePlayCtx(); }
       function b64ToBytes(b64) {
         var bin = atob(b64);
         var out = new Uint8Array(bin.length);
@@ -306,6 +382,7 @@ window.__ModuleLoader__.load({
         if (!done) return;
         // utterance complete: decode all chunks then play gaplessly
         var ctxP = ensurePlayCtx();
+        if (!ctxP) { delete play.utts[id]; return; } // no audio API: drop silently
         var buffers = [];
         var chain = Promise.resolve();
         u.chunks.forEach(function (b) {
@@ -359,7 +436,7 @@ window.__ModuleLoader__.load({
       function Pill(props) {
         var s = useStore();
         var dot = el('span', { className: 'dsvm-dot ' + (s.phase === 'listening' ? 'dsvm-pulse' : ''), style: { background: PHASE_COLOR[s.phase] || '#888' } });
-        var snippet = s.partial || s.lastCommitted || (s.phase === 'disconnected' ? 'Voice is off' : s.phase);
+        var snippet = s.unsupported ? '⚠ ' + s.unsupported : (s.partial || s.lastCommitted || (s.phase === 'disconnected' ? 'Voice is off' : s.phase + '·v14'));
         var inner = [
           dot,
           s.phase === 'listening' ? el(LevelBars, { key: 'bars', s: s }) : null,
@@ -389,13 +466,11 @@ window.__ModuleLoader__.load({
           el('div', { className: 'dsvm-caps' }, captions),
           el('div', { className: 'dsvm-row' },
             el('button', {
-              className: 'dsvm-btn dsvm-ptt' + (s.phase === 'disconnected' ? ' dsvm-disabled' : ''),
+              className: 'dsvm-btn dsvm-ptt' + (s.phase === 'disconnected' ? ' dsvm-disabled' : '') + (s.phase === 'listening' ? ' dsvm-live' : ''),
               disabled: s.phase === 'disconnected',
-              title: s.phase === 'disconnected' ? 'Voice is off' : 'Hold to talk',
-              onPointerDown: function () { pttDown(); },
-              onPointerUp: function () { pttUp(); },
-              onPointerLeave: function () { if (s.phase === 'listening') pttUp(); },
-            }, '🎙 Hold to talk'),
+              title: s.phase === 'disconnected' ? 'Voice is off' : (s.phase === 'listening' ? 'Stop listening' : 'Ambient listen (click to toggle)'),
+              onClick: function () { pttToggle(); },
+            }, s.phase === 'listening' ? '⏹ Stop listening' : '🎙 Ambient listen'),
             el('button', {
               className: 'dsvm-btn',
               onClick: function () { (s.powered ? powerOff() : powerOn()); },
@@ -415,15 +490,13 @@ window.__ModuleLoader__.load({
 
       function PttButton(props) {
         var s = useStore();
-        var off = s.phase === 'disconnected';
+        var on = s.phase === 'listening';
         return el('button', {
-          className: 'dsvm-input-ptt' + (off ? ' dsvm-disabled' : '') + (s.phase === 'listening' ? ' dsvm-live' : ''),
-          title: off ? 'Voice is off' : 'Hold to talk',
+          className: 'dsvm-input-ptt' + (s.phase === 'disconnected' ? ' dsvm-disabled' : '') + (on ? ' dsvm-live' : ''),
+          title: on ? 'Stop listening' : (s.phase === 'disconnected' ? 'Voice is off' : 'Ambient listen: click to toggle'),
           disabled: false,
-          onPointerDown: function (e) { e.preventDefault(); if (!off) pttDown(); },
-          onPointerUp: function () { if (!off) pttUp(); },
-          onPointerLeave: function () { if (!off && s.phase === 'listening') pttUp(); },
-        }, '🎙');
+          onClick: function () { pttToggle(); },
+        }, on ? '⏹' : '🎙');
       }
 
       /* ============ hotkey ============ */
@@ -444,28 +517,21 @@ window.__ModuleLoader__.load({
         var combo = store.get().hotkey;
         if (!combo || !document || typeof document.addEventListener !== 'function') return;
         uninstallHotkey();
-        var down = function (e) {
+        var onKey = function (e) {
           if (!parseCombo(combo, e)) return;
           e.preventDefault();
           if (e.repeat) return;
-          var now = Date.now();
-          if (now - hk.lastTap < 400) { hk.lastTap = 0; (store.get().powered ? powerOff() : powerOn()); return; }
-          hk.lastTap = now;
-          pttDown();
+          // Ambient mode (permanent): one press toggles listening on/off.
+          // (Double-tap power toggle REMOVED — it silently power-cycled sessions.)
+          pttToggle();
         };
-        var up = function (e) {
-          if (!parseCombo(combo, e)) return;
-          e.preventDefault();
-          pttUp();
-        };
-        document.addEventListener('keydown', down);
-        document.addEventListener('keyup', up);
-        hk.listeners = { down: down, up: up };
+        document.addEventListener('keydown', onKey);
+        hk.listeners = { down: onKey, up: null };
       }
       function uninstallHotkey() {
         if (hk.listeners && document) {
           document.removeEventListener('keydown', hk.listeners.down);
-          document.removeEventListener('keyup', hk.listeners.up);
+          if (hk.listeners.up) document.removeEventListener('keyup', hk.listeners.up);
         }
         hk.listeners = null;
       }
@@ -506,6 +572,7 @@ window.__ModuleLoader__.load({
         '.dsvm-cap{font-size:12px;opacity:.85;} .dsvm-cap-error{color:#ff6b6b;opacity:1;}',
         '.dsvm-row{display:flex;gap:8px;justify-content:space-between;}',
         '.dsvm-ptt{flex:1;text-align:center;}',
+        '.dsvm-ptt.dsvm-live{background:rgba(52,199,117,.25);}',
         '.dsvm-warn{color:#ffb020;font-size:11px;}',
         '.dsvm-toggle{border:0;background:transparent;color:inherit;font-size:15px;cursor:pointer;padding:2px 6px;border-radius:6px;}',
         '.dsvm-toggle:hover{background:rgba(128,128,128,.2);}',
@@ -536,9 +603,19 @@ window.__ModuleLoader__.load({
         });
         var poll = ctx.interval(function () {
           refreshState();
+          installHotkey(); // re-read config: hotkey may have been set at runtime
         }, 4000);
+        var onGesture = function () { seedPlayCtx(); };
+        if (document && typeof document.addEventListener === 'function') {
+          document.addEventListener('pointerdown', onGesture, true);
+          document.addEventListener('keydown', onGesture, true);
+        }
         return function () {
           poll();
+          if (document && typeof document.removeEventListener === 'function') {
+            document.removeEventListener('pointerdown', onGesture, true);
+            document.removeEventListener('keydown', onGesture, true);
+          }
           uninstallHotkey();
           disconnectWs();
           stopMic();

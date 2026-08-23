@@ -388,11 +388,52 @@ return {
       var model = currentModel(st.svc); // {provider, model} or {}
       var t = isNonEmptyString(title) ? title : defaultTitle(text);
       st.fsm.transition('thinking', 'create_thread');
+      // The deployment persona references {{cwd}}; agents created without it
+      // assemble in _no-cwd/ and every turn dies with "prompt variable
+      // \"{{cwd}}\" has no value" (verified in the live session log). Prefer the
+      // user's newest real session cwd (refreshed corpus), else the sandbox
+      // workspaceRoot.
+      var cwd = (typeof this.defaultCwd === 'string' && this.defaultCwd.length) ? this.defaultCwd : null;
+      if (!cwd) {
+        try {
+          var sp = st.svc.sandboxPolicy;
+          if (sp && typeof sp.workspaceRoot === 'string' && sp.workspaceRoot.length) cwd = sp.workspaceRoot;
+        } catch (e) { /* fall back to omitting meta (pre-fix behavior) */ }
+      }
       var options = {
         sessionId: id,
         agentOptions: model,
-        // meta.cwd intentionally omitted — the deployment default applies
+        // Join the user's agent preset so the agent actually sees its tools/
+        // prompt/skills: recording meta.agentPreset alone leaves the agent on
+        // the "empty global layer" (only process-wide tools like voice_say);
+        // the preset must be MOUNTED on the agent ctx at factory setup
+        // (pattern: dsh-host-apiproxy createAgent setup hook).
+        setup: null,
       };
+      var ap = st.svc.agentPresets;
+      if (ap && typeof ap.mount === 'function') {
+        // Mount the DEPLOYMENT DEFAULT preset (undefined id — exactly what the
+        // web GUI does for normal sessions). setup MUST await the mount: the
+        // harness publishes the agent (and the model assembles its tool list)
+        // only after every setup await settles — a fire-and-forget mount lands
+        // after step 1 already saw the empty global layer (only voice_say).
+        // Keep the function async and RETURN NOTHING: a returned mount result
+        // carries a non-callable .commit -> "(intermediate value)?.commit is
+        // not a function".
+        options.setup = async function (agentCtx) {
+          try {
+            var preset = await ap.mount(agentCtx, undefined);
+            st.captions.push('status', 'voice preset joined: ' + String(preset && preset.id));
+          } catch (e) {
+            st.captions.push('error', 'voice preset mount failed: ' + String(e && e.message || e));
+          }
+        };
+      }
+      if (cwd) {
+        var meta = { cwd: cwd };
+        if (typeof this.defaultPreset === 'string' && this.defaultPreset.length) meta.agentPreset = this.defaultPreset;
+        options.meta = meta;
+      }
       return createAgentOnce(st, options).then(function (handle) {
         self.handles.set(id, handle);
         self.registry.set(id, { title: t, status: 'running', lastActivity: Date.now(), watching: true });
@@ -480,6 +521,23 @@ return {
       var sq = st.svc.sessionQuery;
       if (!sq) return Promise.resolve(false);
       return sq.listSessions().then(function (records) {
+        // Track the newest REAL session's cwd as the deployment default for
+        // voice-created agents (idempotent; `create` prefers it so threads
+        // land in the user's working folder, not the sandbox root).
+        var newestTs = 0;
+        var recordsArr2 = records || [];
+        for (var rr = 0; rr < recordsArr2.length; rr++) {
+          var hd = recordsArr2[rr] && recordsArr2[rr].header;
+          if (!hd || typeof hd.id !== 'string' || hd.id.indexOf('voice-') === 0) continue;
+          var ts = typeof hd.createdAt === 'number' ? hd.createdAt : 0;
+          if (ts < newestTs) continue;
+          newestTs = ts;
+          if (typeof hd.cwd === 'string' && hd.cwd.length) self.defaultCwd = hd.cwd;
+          // real sessions carry the deployment preset (e.g. "cordis"); without
+          // it voice agents get a bare tool surface (only voice_say — no shell/
+          // file tools) and cannot do real work.
+          if (typeof hd.agentPreset === 'string' && hd.agentPreset.length) self.defaultPreset = hd.agentPreset;
+        }
         var statusById = new Map();
         var agentsSvc = st.svc.agents;
         if (agentsSvc) {
@@ -1648,6 +1706,8 @@ return {
         sessionQuery: ctx.get('sessionQuery'),
         subagents: ctx.get('subagents'),
         agentDefaultModel: ctx.get('agentDefaultModel'),
+        agentPresets: ctx.get('agentPresets'),
+        sandboxPolicy: ctx.get('sandboxPolicy'),
       },
       voice: {},
       settingsRegistered: false,
@@ -1678,6 +1738,9 @@ return {
     state.muted = !state.voice.enabled;
     state.queue = new SpeakQueue(state);
     state.threads = new ThreadManager(state);
+    state.threads.defaultCwd = null;   // seeded by refresh(); see ThreadManager.refresh
+    state.threads.defaultPreset = null; // seeded by refresh(); see ThreadManager.refresh
+    state.threads.refresh().catch(function () { /* best-effort cwd/preset corpus */ });
     state.router = new IntentRouter(state);
 
     registerSettings(state);
