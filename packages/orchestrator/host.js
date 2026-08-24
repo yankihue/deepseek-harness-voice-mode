@@ -110,6 +110,25 @@ return {
       if (i <= 0) return { dir: absolute, base: absolute };
       return { dir: absolute.slice(0, i), base: absolute.slice(i + 1) };
     }
+    function installedHelperPath() {
+      // Static installs load this CommonJS file from packages/orchestrator.
+      // Resolve the bundled helper from that location so clones and release
+      // archives work without an author-specific setting.
+      if (typeof __dirname === 'string' && __dirname.length) {
+        return __dirname + '/../../voice-link/entry.js';
+      }
+      return '';
+    }
+    function isLoopbackAddress(value) {
+      var address = String(value || '').toLowerCase();
+      return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+    }
+    function isLoopbackHost(value) {
+      var host = String(value || '').toLowerCase();
+      return /^localhost(?::[0-9]+)?$/.test(host) ||
+        /^127\.0\.0\.1(?::[0-9]+)?$/.test(host) ||
+        /^\[::1\](?::[0-9]+)?$/.test(host);
+    }
     function isTruthy(v) {
       return v === true;
     }
@@ -516,7 +535,7 @@ return {
           // // VERIFY(agent.send UserMessage accepted by the loop; MessageId/InboxTarget
           // //   are runtime strings) — verified dsh-agent runtime-types Agent.send +
           // //   dsh-llm message.d.ts UserMessage {id,role,content,source}
-          var wake = this.makeUserMessage(text);
+          var wake = self.makeUserMessage(text);
           var live = liveAgent(st.svc, id);
           if (live) { live.send(wake, 'next-step', true); }
           else if (handle && handle.agent && handle.agent.send) { handle.agent.send(wake, 'next-step', true); }
@@ -982,7 +1001,13 @@ return {
         : Promise.resolve(undefined);
       keyPromise.then(function (resolved) {
         if (state.helper.stopped) { state.helper.starting = false; return; }
-        var helperPath = state.voice.helperPath;
+        var helperPath = installedHelperPath();
+        if (!isNonEmptyString(helperPath)) {
+          console.error('[voice.orchestrator] bundled helper path unavailable; use the static plugin install');
+          state.helper.failed = true;
+          state.helper.starting = false;
+          return;
+        }
         var parts = splitPath(helperPath);
         var spec = {
           argv: ['node', parts.base],
@@ -1375,8 +1400,8 @@ return {
     // //   runtime rejects the shape, registration fails here and every voice.config
     // //   RPC degrades to 'unavailable' — nothing else is affected.
     // //   Inspect: Service.listService settings. Also note: PROTOCOL §4 lists the
-    // //   namespace fields; 'helperPath' below is the task-ordered extension that
-    // //   locates the voice-link entry script (configurable absolute path).
+    // //   namespace fields. The helper path is derived from this installed plugin
+    // //   instead of being user-configurable through the browser control plane.
     var VOICE_DEFAULTS = {
       enabled: true,
       mode: 'ptt',
@@ -1388,7 +1413,6 @@ return {
       dailyCreditCap: undefined,
       autoSpeakReports: true,
       hotkey: '',
-      helperPath: '/Users/yanki/Desktop/personal/seeker/deepseek-voice-mode/voice-link/entry.js',
     };
     var VOICE_TYPES = {
       enabled: { type: 'boolean', description: 'Master switch for the voice layer' },
@@ -1401,7 +1425,6 @@ return {
       dailyCreditCap: { type: 'number', description: 'Optional daily credit cap in credits' },
       autoSpeakReports: { type: 'boolean', description: 'Speak thread/goal status announcements' },
       hotkey: { type: 'string', description: 'Global push-to-talk hotkey' },
-      helperPath: { type: 'string', description: 'Absolute path to the voice-link entry script' },
     };
     function makeSettingsSchema(defs) {
       var fn = function identityResolver(value) { return value; };
@@ -1587,6 +1610,32 @@ return {
         } catch (e) { try { res.end(); } catch (e2) { /* ignore */ } }
       }
       if (req.method !== 'POST') { reply(405, { ok: false, error: { code: 'method_not_allowed', message: 'POST expected' } }); return; }
+      var headers = req.headers || {};
+      var remoteAddress = req.socket && req.socket.remoteAddress;
+      if (!isLoopbackAddress(remoteAddress)) {
+        reply(403, { ok: false, error: { code: 'loopback_required', message: 'voice RPC is local-only' } });
+        return;
+      }
+      var host = String(headers.host || '');
+      if (!isLoopbackHost(host)) {
+        reply(403, { ok: false, error: { code: 'loopback_host_required', message: 'localhost host required' } });
+        return;
+      }
+      var origin = String(headers.origin || '');
+      var fetchSite = String(headers['sec-fetch-site'] || '').toLowerCase();
+      if (!origin || (origin !== 'http://' + host && origin !== 'https://' + host)) {
+        reply(403, { ok: false, error: { code: 'origin_denied', message: 'same-origin request required' } });
+        return;
+      }
+      if (fetchSite && fetchSite !== 'same-origin') {
+        reply(403, { ok: false, error: { code: 'origin_denied', message: 'cross-site request denied' } });
+        return;
+      }
+      var contentType = String(headers['content-type'] || '').toLowerCase();
+      if (contentType.indexOf('application/json') !== 0) {
+        reply(415, { ok: false, error: { code: 'content_type_required', message: 'application/json expected' } });
+        return;
+      }
       var fn = handlers[methodName];
       if (!fn) { reply(404, { ok: false, error: { code: 'no_such_method', message: methodName || '(empty)' } }); return; }
       var chunks = [];

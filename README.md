@@ -96,15 +96,14 @@ Full user manual: `REVIEW.md` §5. The essentials:
 
 Settings namespace `voice` (Settings → Voice): enabled, push-to-talk mode,
 ElevenLabs voice/model ids, STT language, VAD sensitivity, optional daily
-credit cap, auto-speak reports, hotkey, and `helperPath` (defaults to this
-machine's absolute helper path — override it if you clone elsewhere; **H5**:
-be careful editing the schema on upgrades).
+credit cap, auto-speak reports, and hotkey. The helper is resolved from the
+installed plugin directory; no machine-specific path setting is required.
 
 ## Development
 
 ```sh
 cd voice-link
-node --test          # 100 offline tests, ~30 s, no network needed
+node --test          # 100 offline tests, ~2 s, no network needed
 ```
 
 `node voice-link/m0-driver.js <pcm16-16k-mono.raw> "expected transcript"`
@@ -118,8 +117,6 @@ runs a live browser-less E2E drill against real ElevenLabs (needs
   (no hard cost gate yet — `dailyCreditCap` is optional).
 - **Manual install** into a DSH profile (patch + symlink + restart); not yet
   published to npm.
-- `helperPath` default is a machine-specific absolute path — set it in
-  settings after cloning to another machine.
 - One-time WS tokens use deterministic entropy (H3 in `REVIEW.md`); settings
   schema upgrades are fragile (H5). See the hack register in `REVIEW.md` for
   the full H1–H12 list.

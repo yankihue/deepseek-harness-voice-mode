@@ -120,6 +120,7 @@ window.__ModuleLoader__.load({
             if (net.pingDisposer) { net.pingDisposer(); net.pingDisposer = null; }
             net.ws = null;
             stopMic();
+            resetPlayback();
             if (!net.closedByUs) scheduleReconnect();
             else refreshState();
           };
@@ -156,12 +157,14 @@ window.__ModuleLoader__.load({
             store.set({ lastCommitted: msg.text || '', partial: '', phase: 'thinking' });
             break;
           case 'tts.start':
+            mic.suppress = true;
             break;
           case 'tts.audio':
             playChunk(msg.id, msg.b64, msg.done === true);
             break;
           case 'tts.canceled':
             cancelPlayback(msg.id);
+            if (play.activeCount <= 0) mic.suppress = false;
             break;
           case 'tts.error':
             mic.suppress = false; // playback pipeline failed: never stay muted
@@ -372,19 +375,33 @@ window.__ModuleLoader__.load({
         wsSend({ type: 'tts.cancel' });
         Object.keys(play.utts).forEach(function (id) { cancelPlayback(id); });
       }
-      function cancelPlayback(id) {
+      function finishPlayback(id) {
         var u = play.utts[id];
         if (!u) return;
         if (play.activeCount > 0) play.activeCount--;
-        u.sources.forEach(function (s) { try { s.stop(); } catch (e) {} });
         delete play.utts[id];
         if (play.activeCount <= 0) mic.suppress = false;
       }
-      function playChunk(id, b64, done) {
-        if (!b64) { if (done) cancelPlayback(id); return; }
+      function cancelPlayback(id) {
         var u = play.utts[id];
-        if (!u) { u = play.utts[id] = { chunks: [], sources: [], nextAt: 0 }; play.activeCount++; }
-        u.chunks.push(b64);
+        if (!u) return;
+        u.sources.forEach(function (s) { try { s.stop(); } catch (e) {} });
+        finishPlayback(id);
+      }
+      function resetPlayback() {
+        Object.keys(play.utts).forEach(function (id) { cancelPlayback(id); });
+        play.activeCount = 0;
+        mic.suppress = false;
+      }
+      function playChunk(id, b64, done) {
+        if (!b64 && !done) return;
+        var u = play.utts[id];
+        if (!u) {
+          u = play.utts[id] = { chunks: [], sources: [], nextAt: 0 };
+          play.activeCount++;
+          mic.suppress = true;
+        }
+        if (b64) u.chunks.push(b64);
         if (!done) return;
         // utterance complete: decode all chunks then play gaplessly
         var ctxP = ensurePlayCtx();
@@ -397,7 +414,7 @@ window.__ModuleLoader__.load({
           }).then(function (buf) { buffers.push(buf); }).catch(function (e) {});
         });
         chain.then(function () {
-          delete play.utts[id];
+          if (play.utts[id] !== u) return; // canceled while decodeAudioData was pending
           var at = Math.max(ctxP.currentTime + 0.02, u.nextAt || 0);
           buffers.forEach(function (buf, i) {
             var src = ctxP.createBufferSource();
@@ -406,15 +423,13 @@ window.__ModuleLoader__.load({
             src.start(at);
             u.sources.push(src);
             if (i === buffers.length - 1) src.onended = function () { // mic reopens when the LAST buffer finishes
-              if (play.activeCount > 0) play.activeCount--;
-              if (play.activeCount <= 0) mic.suppress = false;
+              finishPlayback(id);
             };
             at += buf.duration;
           });
           u.nextAt = at;
           if (buffers.length === 0) { // nothing was decoded: release immediately
-            if (play.activeCount > 0) play.activeCount--;
-            if (play.activeCount <= 0) mic.suppress = false;
+            finishPlayback(id);
             store.set({ phase: 'ready', speakingText: '' });
           }
         });

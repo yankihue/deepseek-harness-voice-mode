@@ -24,7 +24,7 @@ The orchestrator now ships as a STATIC host-composition plugin loaded from disk:
 ## Workstreams
 | ID | Scope | Status | Output |
 |----|-------|--------|--------|
-| W1 | voice-link helper | ✅ DONE (100/100 tests) + live-verified STT/TTS | voice-link/ |
+| W1 | voice-link helper | ✅ DONE (100/100 offline tests) + live-verified STT/TTS | voice-link/ |
 | W2 | orchestrator host code | ✅ DONE + static-port edits (HTTP RPC, dual tool reg) | packages/orchestrator/host.js → plugin.cjs |
 | W3 | client UI | RUNNING; told to switch host.call → fetch('/__dsh-voice/rpc/…') | packages/client/client.js |
 | W4 | assembly/e2e | MAIN AGENT — awaiting restart + W3 | — |
@@ -89,7 +89,7 @@ sidebar, pill bottom-right → hold PTT and speak.
 ## Workstreams
 | ID | Scope | Status | Output location |
 |----|-------|--------|-----------------|
-| W1 | voice-link helper | ✅ DONE + W2-contract reconciled (99/99 tests, D11–D14); M0 driver validated to auth wall; 1 real bug fixed (wss: scheme) | voice-link/ |
+| W1 | voice-link helper | ✅ DONE + W2-contract reconciled (100/100 offline tests, D11–D14); M0 driver validated to auth wall; 1 real bug fixed (wss: scheme) | voice-link/ |
 | W2 | orchestrator host plugin code | ✅ DONE round 5 — host.js 1582L parses, smoke 27/27; INTEGRATION.md has VERIFY registry V1–V23 + deviations D1–D7 | packages/orchestrator/host.js |
 | W3 | client UI plugin code | RUNNING — agent 2caa9145 (only remaining build) | packages/client/client.js |
 | W4 | assembly/probes/e2e | MAIN AGENT — m0-driver.js ready; blocked only on API key | voice-link/m0-driver.js |
@@ -110,7 +110,7 @@ sidebar, pill bottom-right → hold PTT and speak.
    api.elevenlabs.io with dummy key — full path proven: spawn→init→ready→attach→WS 101
    handshake→hello→listen.start→Scribe connect→server auth_error→mapped stt_auth→stt.error
    delivered→FSM idle. Found+fixed REAL helper bug: node:http(s) rejects wss: URLs
-   (wsio.connectOutbound now scheme-normalizes wss:→https:, tests still 99/99).
+   (wsio.connectOutbound now scheme-normalizes wss:→https:, tests still 100/100).
    Fixture chain ready: say → afconvert → /tmp/m0.raw (2.9s speech PCM16k mono).
    Driver quirks fixed: init line must be sent; upgrade bytes precede socket.open wait.
 2. ON KEY ARRIVAL: (a) ELEVENLABS_API_KEY=<real> node m0-driver.js /tmp/m0.raw "start a thread"

@@ -17,3 +17,9 @@ jobs:
         working-directory: voice-link
         # dependency-free: no install step required
         run: node --test
+      - name: Verify shipped plugin bundles
+        run: |
+          node --check packages/orchestrator/host.js
+          node --check packages/orchestrator/plugin.cjs
+          node --check packages/client/lib/client.js
+          node --test test/release-contract.test.js

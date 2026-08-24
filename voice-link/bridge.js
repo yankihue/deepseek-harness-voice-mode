@@ -444,6 +444,9 @@ class BrowserSession {
         this._shutdown(1000, 'heartbeat timeout');
       }
     }, this.hbCheckMs);
+    // The helper's stdin/socket lifecycle owns process liveness. A forgotten
+    // browser detach must not keep shutdown or the offline test runner alive.
+    if (typeof this.hbInterval.unref === 'function') this.hbInterval.unref();
   }
 
   // -------------------------------------------------------------- teardown
