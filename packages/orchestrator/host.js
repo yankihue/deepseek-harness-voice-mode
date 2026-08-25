@@ -45,6 +45,7 @@ return {
     var CAPTIONS_MAX = 50;
     var ROUTER_TIMEOUT_MS = 8000;         // low-reasoning intent router budget
     var ROUTER_REASONING_EFFORT = 'low';
+    var VOICE_AGENT_REASONING_EFFORT = 'low';
     var HELPER_READY_TIMEOUT_MS = 5000;
     var REPLY_WATCH_MAX_MS = 20 * 60 * 1000; // absolute lifetime of one reply watch
     var REPLY_MAX_CHARS = 1100;              // spoken reply length cap (TTS)
@@ -516,6 +517,14 @@ return {
           try {
             var preset = await ap.mount(agentCtx, undefined);
             st.captions.push('status', 'voice preset joined: ' + String(preset && preset.id));
+            // Voice-created agents do not pass reasoning through AgentOptions.
+            // Pin the scoped request after the preset/default-model waterfall
+            // resolves: reasoning-only models (including ox-alpha-free) reject
+            // the deployment's inherited "off" value before producing a token.
+            agentCtx.on('agent/request', async function (_payload, next) {
+              var request = await next();
+              return Object.assign({}, request, { reasoningEffort: VOICE_AGENT_REASONING_EFFORT });
+            });
           } catch (e) {
             st.captions.push('error', 'voice preset mount failed: ' + String(e && e.message || e));
           }

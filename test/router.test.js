@@ -81,3 +81,12 @@ test('LLM fallback uses the bounded low-reasoning router contract', () => {
     assert.doesNotMatch(code, /Working on it\./);
   }
 });
+
+test('voice-created agents pin a provider-supported reasoning effort', () => {
+  for (const artifact of artifacts) {
+    const code = fs.readFileSync(path.join(root, artifact), 'utf8');
+    assert.match(code, /var VOICE_AGENT_REASONING_EFFORT = 'low'/);
+    assert.match(code, /agentCtx\.on\('agent\/request'/);
+    assert.match(code, /reasoningEffort: VOICE_AGENT_REASONING_EFFORT/);
+  }
+});
