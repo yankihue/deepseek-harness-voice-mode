@@ -118,14 +118,17 @@ ElevenLabs payloads) stays inside the tunnel untouched — the helper owns it en
 FSM: `disconnected → ready → listening → thinking → speaking` (+ `muted` overlay flag).
 Transitions driven by stt events, intent lifecycle, tts events. Illegal transitions logged, never thrown.
 
-Intent router: ONE fast `llm.stream` call. System prompt lists verbs; user content = transcript.
+Intent router: deterministic create/status/interrupt phrases first. Ambiguous
+requests use ONE `llm.stream` call with `reasoningEffort: low`. System prompt
+lists verbs; user content = transcript.
 Required strict JSON output:
 ```
 {"verb":"create_thread|message_thread|status|interrupt|summarize|speak_only|route_current",
- "threadTitle?":string,"text?":string,"ack":string}   // ack = short spoken acknowledgement template
+ "threadTitle?":string,"text?":string}
 ```
-Parse failure ⇒ `route_current` with raw transcript. Never block on router >2 s: timeout ⇒ ack
-"Working on it" + route_current.
+Parse failure ⇒ `route_current` with raw transcript. Never block on the LLM
+router beyond 8 s. Timeout/model/JSON failures are recorded in captions and
+diagnostics; the target operation owns the single spoken acknowledgement.
 
 Verb execution mapping (exact services, verified signatures):
 - create_thread → `agentLoop.createAgent(ownerCtx,{...})` (options shape verified at build time);

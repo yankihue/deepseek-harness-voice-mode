@@ -8,7 +8,7 @@
  *   - voice-link helper subprocess (stdio NDJSON control + byte tunnel)
  *   - /__dsh-voice/ws upgrade route: one-time-token check, byte pipe socket<->helper
  *   - package-private RPC surface (voice.*)
- *   - IntentRouter (one llm.stream call, strict JSON, 2s budget)
+ *   - IntentRouter (deterministic commands + low-reasoning LLM fallback)
  *   - ThreadManager (create / message / interrupt / status / summarize / watch)
  *   - SpeakQueue (priority preemption, 1.5s coalescing, cap) + captions ring
  *   - process-wide event wiring, dynamic Tool voice_say, /voice command,
@@ -43,7 +43,8 @@ return {
     var QUEUE_ABS_CAP = 20;               // hard ceiling regardless of priority
     var THROTTLE_MS = 8000;               // event announcement throttle per session
     var CAPTIONS_MAX = 50;
-    var ROUTER_TIMEOUT_MS = 2000;         // intent router budget
+    var ROUTER_TIMEOUT_MS = 8000;         // low-reasoning intent router budget
+    var ROUTER_REASONING_EFFORT = 'low';
     var HELPER_READY_TIMEOUT_MS = 5000;
     var REPLY_WATCH_MAX_MS = 20 * 60 * 1000; // absolute lifetime of one reply watch
     var REPLY_MAX_CHARS = 1100;              // spoken reply length cap (TTS)
@@ -737,24 +738,24 @@ return {
     };
 
     /* ================================================================== *
-     * 7. IntentRouter (one llm.stream call, strict JSON, 2s budget)
+     * 7. IntentRouter (deterministic commands + bounded LLM fallback)
      * ================================================================== */
     var ROUTER_SYSTEM =
       'You route a spoken request spoken to a coding-assistant harness into one verb. ' +
       'Answer ONLY with one JSON object, no prose, no markdown fences:\n' +
-      '{"verb":"create_thread|message_thread|status|interrupt|summarize|speak_only|route_current","threadTitle?":"string","text?":"string","ack":"string"}\n' +
+      '{"verb":"create_thread|message_thread|status|interrupt|summarize|speak_only|route_current","threadTitle?":"string","text?":"string"}\n' +
       'Rules: creating work => create_thread (threadTitle = short title, text = the full request). ' +
       'Adding to an existing thread => message_thread (text = the message). ' +
       'Asking what is happening => status. Stopping work => interrupt. ' +
       'Summarizing a thread => summarize (threadTitle = optional thread id). ' +
       'Pure speech with no action => speak_only (text = what to say). ' +
       'Conversational chatter, questions or replies to the assistant => route_current. ' +
-      'Anything uncertain => route_current (text = the raw request). ' +
-      'ack = a short spoken acknowledgement template, max 12 words.';
+      'Anything uncertain => route_current (text = the raw request).';
     // // VERIFY(llm.stream GenerateOptions) — verified dsh-llm types: {provider,model,
-    // //   messages, system?, temperature?, maxTokens?, stop?, signal?}; chunks are
+    // //   purpose?, reasoningEffort?, messages, system?, temperature?, maxTokens?,
+    // //   stop?, signal?}; chunks are
     // //   text-delta / finish. A timeout abandons reading; no AbortSignal exists in
-    // //   the sandbox, so the 2s budget is enforced by racing ctx.timeout(2000).
+    // //   the sandbox, so the 8s budget is enforced by racing ctx.timeout(8000).
     // //   Inspect: Service.listService llm + agentDefaultModel.currentSelection.
     function currentModel(svc) {
       var adm = svc.agentDefaultModel;
@@ -800,8 +801,61 @@ return {
         verb: obj.verb,
         threadTitle: isNonEmptyString(obj.threadTitle) ? obj.threadTitle : undefined,
         text: isNonEmptyString(obj.text) ? obj.text : undefined,
-        ack: isNonEmptyString(obj.ack) ? obj.ack : undefined,
       };
+    }
+    /* ROUTER_CORE_START — tests execute this exact pure classifier. */
+    function deterministicRoute(transcript) {
+      if (!isNonEmptyString(transcript)) return null;
+      var text = transcript.trim();
+      var polite = '(?:(?:please|can you|could you|would you)\\s+)';
+
+      // Explicit lifecycle commands must not depend on model latency or JSON.
+      var createRe = new RegExp('^' + polite + '?(?:start|create|open|launch|spawn|make)\\s+(?:(?:a|an|another|new)\\s+)?(?:thread|task|chat|session)\\b', 'i');
+      if (createRe.test(text) || /^(?:new|another)\s+(?:thread|task|chat|session)\b/i.test(text)) {
+        var named = text.match(/\b(?:called|named)\s+(.+?)(?=\s+(?:to|for|that|which)\s+|[,.!?]|$)/i);
+        return {
+          verb: 'create_thread',
+          threadTitle: named && isNonEmptyString(named[1]) ? named[1].trim() : undefined,
+          text: text,
+        };
+      }
+
+      var stopRe = new RegExp('^' + polite + '?(?:stop|cancel|interrupt|halt|pause)(?:\\s+(?:the|this))?(?:\\s+(?:current|active))?(?:\\s+(?:thread|task|agent|work|session))?(?:\\s+(?:called|named|about))?(?:\\s+(.+?))?[.!?]*$', 'i');
+      var stop = text.match(stopRe);
+      if (stop && (/^(?:please\s+)?(?:stop|cancel|interrupt|halt|pause)[.!?]*$/i.test(text) || /\b(?:thread|task|agent|work|session)\b/i.test(text))) {
+        return { verb: 'interrupt', threadTitle: isNonEmptyString(stop[1]) ? stop[1].trim() : undefined };
+      }
+
+      var statusRe = new RegExp('^' + polite + '?(?:' +
+        'status|(?:any\\s+)?progress|progress update|status update|any updates?|' +
+        '(?:check|show|tell|give|report)(?:\\s+me)?(?:\\s+the)?\\s+(?:status|progress)|' +
+        'what(?:[\\x27’]s| is)\\s+(?:the\\s+)?(?:status|progress)|' +
+        'what(?:[\\x27’]s| is)\\s+(?:running|happening)|' +
+        'how\\s+(?:is|are)\\b.+\\bgoing|' +
+        'when\\s+there(?:[\\x27’]s| is)\\s+progress' +
+        ')[.!?]*$', 'i');
+      if (statusRe.test(text)) return { verb: 'status' };
+      if (/^(?:(?:please|can you|could you|would you)\s+)?(?:tell|notify|update)(?:\s+me)?(?:,\s*(?:um|uh),?)?\s+when\s+there(?:['’]s| is)\s+progress[.!?]*$/i.test(text)) {
+        return { verb: 'status' };
+      }
+      return null;
+    }
+    /* ROUTER_CORE_END */
+    function recordRoute(state, source, verb, reason, startedAt, model) {
+      var diag = {
+        ts: Date.now(),
+        source: source,
+        verb: verb,
+        reason: reason || null,
+        elapsedMs: Math.max(0, Date.now() - startedAt),
+        provider: model && model.provider || null,
+        model: model && model.model || null,
+        reasoningEffort: model && model.provider ? ROUTER_REASONING_EFFORT : null,
+      };
+      state.routeDiag = diag;
+      var detail = reason ? ' (' + reason + ')' : '';
+      state.captions.push('status', 'route: ' + verb + ' via ' + source + detail);
+      console.log('[voice.router] ' + verb + ' via ' + source + detail + ' in ' + diag.elapsedMs + 'ms');
     }
     // // VERIFY(agentDefaultModel.currentSelection() exists and returns
     // //   {provider, model}) — verified dsh-agent model-selection.d.ts ModelSelection
@@ -810,34 +864,51 @@ return {
     }
     IntentRouter.prototype.route = function (transcript) {
       var st = this.state;
+      var startedAt = Date.now();
+      var local = deterministicRoute(transcript);
+      if (local) {
+        recordRoute(st, 'deterministic', local.verb, null, startedAt, null);
+        return this.execute(transcript, local);
+      }
       var llm = st.svc.llm;
       var model = currentModel(st.svc);
-      // degraded mode: router unavailable -> route_current + canned ack
+      // Degraded mode is explicit in captions/diagnostics; the target method
+      // supplies its own single acknowledgement, avoiding "Working" + "Got it".
       if (!llm || !model.provider) {
-        st.queue.push('Working on it.', 1);
+        recordRoute(st, 'fallback', 'route_current', 'model_unavailable', startedAt, model);
         return this.execute(transcript, { verb: 'route_current', text: transcript });
       }
       var options = {
         provider: model.provider,
         model: model.model,
+        purpose: 'voice-intent-router',
+        reasoningEffort: ROUTER_REASONING_EFFORT,
         messages: [{ role: 'user', content: [{ type: 'text', text: transcript }] }],
         system: ROUTER_SYSTEM,
         temperature: 0,
         maxTokens: 160,
       };
-      var deadline = ctx.timeout(ROUTER_TIMEOUT_MS).then(function () { return 'timeout'; });
-      return Promise.race([collectStream(llm.stream(options)), deadline]).then(function (raw) {
-        var parsed = (raw === 'timeout') ? null : parseRouterJson(raw);
-        if (!parsed) {
-          // parse failure / timeout => ack + route_current with the raw transcript
-          st.queue.push('Working on it.', 1);
+      var modelResult = Promise.resolve().then(function () {
+        return collectStream(llm.stream(options));
+      }).then(function (raw) {
+        return { kind: 'model', raw: raw };
+      }, function () {
+        return { kind: 'error' };
+      });
+      var deadline = ctx.timeout(ROUTER_TIMEOUT_MS).then(function () { return { kind: 'timeout' }; });
+      return Promise.race([modelResult, deadline]).then(function (result) {
+        if (result.kind === 'error') {
+          recordRoute(st, 'fallback', 'route_current', 'model_error', startedAt, model);
           return this.execute(transcript, { verb: 'route_current', text: transcript });
         }
-        if (isNonEmptyString(parsed.ack)) st.queue.push(parsed.ack, 1);
+        var parsed = result.kind === 'model' ? parseRouterJson(result.raw) : null;
+        if (!parsed) {
+          var reason = result.kind === 'timeout' ? 'timeout' : 'invalid_json';
+          recordRoute(st, 'fallback', 'route_current', reason, startedAt, model);
+          return this.execute(transcript, { verb: 'route_current', text: transcript });
+        }
+        recordRoute(st, 'llm', parsed.verb, null, startedAt, model);
         return this.execute(transcript, parsed);
-      }.bind(this)).catch(function () {
-        st.queue.push('Working on it.', 1);
-        return this.execute(transcript, { verb: 'route_current', text: transcript });
       }.bind(this));
     };
     // verb -> service mapping (PROTOCOL §4); every service via ctx.get with
@@ -1553,6 +1624,7 @@ return {
             queue: { pending: state.queue.pending.length, active: !!state.queue.active },
             threads: state.threads.registry.size,
             tokens: state.tokens.size,
+            router: state.routeDiag,
           };
         },
       };
@@ -1672,6 +1744,7 @@ return {
         threads: state.threads.rows().length,
         enabled: state.voice.enabled,
         mode: state.voice.mode,
+        router: state.routeDiag,
       };
     }
 
@@ -1940,6 +2013,7 @@ return {
       queue: null,
       threads: null,
       router: null,
+      routeDiag: null,
       tunnel: tunnel,
     };
     var batchDisposers = [];

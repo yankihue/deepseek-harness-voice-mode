@@ -68,7 +68,8 @@ plugin halves use only harness-provided services.
    `127.0.0.1:3080`): press `Alt+Shift+V` → mic → AudioWorklet → WS tunnel →
    helper → ElevenLabs STT → `partial` echoes back live → `committed` transcript
    (`"Voice test. Hello? Voice test."`) → real thread created → TTS reply
-   delivered ("Working on it.", thread lifecycle announcements). Full trace in
+   delivered (the then-current "Working on it." fallback and thread lifecycle
+   announcements; current routing uses one target-owned acknowledgement). Full trace in
    `voice.state.get` captions; helper log folded in during debugging ([h] lines).
 8. **Protocol hello gate is the single point of failure** for any un-gloved
    client (see H9): bridge drops every browser frame before

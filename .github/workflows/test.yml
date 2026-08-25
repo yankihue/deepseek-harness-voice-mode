@@ -22,4 +22,4 @@ jobs:
           node --check packages/orchestrator/host.js
           node --check packages/orchestrator/plugin.cjs
           node --check packages/client/lib/client.js
-          node --test test/release-contract.test.js
+          node --test test/*.test.js

@@ -16,7 +16,8 @@ and have threads report back aloud.
 - **Host orchestrator** (static Cordis composition plugin):
   - HTTP JSON RPC `POST /__dsh-voice/rpc/<method>` (control plane)
   - WS route `/__dsh-voice/ws?t=<one-time-token>` (data plane)
-  - Intent router — one small `llm.stream` call per utterance → strict JSON verb
+  - Intent router — deterministic lifecycle commands first, then one bounded
+    low-reasoning `llm.stream` call → strict JSON verb
   - Thread manager — create / message / interrupt / summarize / watch real
     harness sessions (`agents`/`subagents`/`sessionQuery`)
   - Speak queue — priority preemption, coalescing, drop caps, caption mirror
@@ -91,6 +92,10 @@ Full user manual: `REVIEW.md` §5. The essentials:
 - Spoken verbs: *"start a thread that …"*, *"what's running?"*, *"stop
   <thread>"*, *"summarize <thread>"*; anything else falls through to your
   current thread as a normal message. Watched threads report back aloud.
+- Explicit create/status/stop commands route locally without a model call.
+  Ambiguous requests use the selected Harness model with low reasoning and an
+  8-second deadline. Captions and `voice.diag.ping` expose the chosen verb and
+  `timeout`, `invalid_json`, `model_error`, or `model_unavailable` fallbacks.
 
 ## Configuration
 

@@ -165,7 +165,7 @@ deliverable are recorded as "verified from …"). Order follows the file:
 | 4 captions | 250–270 | ring buffer, last 50 |
 | 5 SpeakQueue | 270–340 | priority preemption (tts.cancel), 1.5 s same-class coalescing, class ≥2 cap, ♪ gating |
 | 6 ThreadManager | 340–470 | registry, `createAgentOnce` (THE agent factory call site), message/interrupt/summarize/refresh/rows/current/watching/announce |
-| 7 IntentRouter | 470–540 | one `llm.stream` call, strict-JSON extraction, 2 s budget via `ctx.timeout` race, fallback route_current |
+| 7 IntentRouter | 470–540 | deterministic lifecycle commands, then low-reasoning `llm.stream`, strict JSON, 8 s budget, diagnosed route_current fallback |
 | 8 leaf-extraction | 540–570 | `foldSessionText` (scalars only, defensive) |
 | 9 helper lifecycle | 570–650 | spawn spec (exact), control handling, tunnel record handling, WS-frame peek, relay heuristics |
 | 10 upgrade route | 650–720 | token validation, attach, request rebuild, socket ⇄ tunnel piping |
