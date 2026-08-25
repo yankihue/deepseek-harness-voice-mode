@@ -78,3 +78,18 @@ test('helper path is derived from the installed plugin in both host artifacts', 
     assert.doesNotMatch(code, /helperPath: \{ type: 'string'/);
   }
 });
+
+test('persisted voice-off state prevents helper startup on cold boot', () => {
+  for (const file of ['packages/orchestrator/host.js', 'packages/orchestrator/plugin.cjs']) {
+    const code = read(file);
+    const start = code.indexOf('function startHelper(state)');
+    const stop = code.indexOf('function stopHelper(state)', start);
+    const startHelper = code.slice(start, stop);
+    assert.match(startHelper, /state\.voice = readVoice\(state\);/);
+    assert.match(startHelper, /if \(!state\.voice\.enabled\) \{\s*state\.helper\.stopped = true;\s*return;/);
+
+    const register = code.indexOf('registerSettings(state);', code.indexOf('var batchDisposers = []'));
+    const initialRead = code.indexOf('state.voice = readVoice(state);', code.indexOf('var batchDisposers = []'));
+    assert.ok(register < initialRead, `${file}: settings must register before initial voice read`);
+  }
+});

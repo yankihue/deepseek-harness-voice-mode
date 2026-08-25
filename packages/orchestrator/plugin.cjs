@@ -1057,6 +1057,12 @@ return {
     function startHelper(state) {
       var sub = state.svc.subprocess;
       if (!sub) { console.log('[voice.orchestrator] subprocess service absent; helper disabled'); return; }
+      state.voice = readVoice(state);
+      state.muted = !state.voice.enabled;
+      if (!state.voice.enabled) {
+        state.helper.stopped = true;
+        return;
+      }
       // Power-state guards: never double-spawn; a hard-stopped helper stays
       // down until applyPowerState resets the flag on re-enable.
       if (state.helper.alive || state.helper.starting || state.helper.stopped) return;
@@ -1145,6 +1151,7 @@ return {
       state.helper.starting = false;
       state.helper.alive = false;
       state.helper.ready = false;
+      state.helper.pid = -1;
       if (h) {
         try { writeCtrl(state, { type: 'stop' }); } catch (e) { /* ignore */ }
         try { h.terminate(); } catch (e) { /* ignore */ }
@@ -2011,6 +2018,7 @@ return {
       tunnel: tunnel,
     };
     var batchDisposers = [];
+    registerSettings(state);
     state.voice = readVoice(state);
     state.muted = !state.voice.enabled;
     state.queue = new SpeakQueue(state);
@@ -2020,7 +2028,6 @@ return {
     state.threads.refresh().catch(function () { /* best-effort cwd/preset corpus */ });
     state.router = new IntentRouter(state);
 
-    registerSettings(state);
     registerRpc(state);
     registerTool(state);
     registerCommand(state);
